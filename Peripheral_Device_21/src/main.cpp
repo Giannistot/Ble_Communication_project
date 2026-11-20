@@ -27,7 +27,7 @@
 //Select value of phy level 1:1M (1Mbps), 2:2M(2Mbps), 3:Coded_2 (500kbps), 4:Coded_8 (125kbps)
 #define PHY_LEVEL 1
 
-#define DATA_SIZE 30
+#define DATA_SIZE 238
 
 uint8_t dummy_data_full[DATA_SIZE];
 int64_t timestamps_log[4096] = {0};

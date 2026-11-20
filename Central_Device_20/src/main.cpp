@@ -8,12 +8,12 @@
 #define ACK_CHARACTERISTIC_UUID "11111111-2222-3333-4444-555555555555"
 
 //Total size of data buffer
-#define BUFFER_SIZE_BYTES 30
+#define BUFFER_SIZE_BYTES 238
 
 //Select value of phy level 1:1M (1Mbps), 2:2M(2Mbps), 3:Coded_2 (500kbps), 4:Coded_8 (125kbps)
 #define PHY_LEVEL 1
 
-#define CONN_INTERVAL 40
+#define CONN_INTERVAL 80
 
 static const NimBLEAdvertisedDevice* advDevice;
 
@@ -298,16 +298,20 @@ void loop() {
 
     if(current_time - last_time >= 1000)
     {
-
-      throughput_kps = (buffer_data_length * 8.0)/1000.0;
-      packets = buffer_data_length / BUFFER_SIZE_BYTES;
+      //Take a snapshot of otal bytes(data) to current_buffer_length (local variable) and reset the shared counter to 0
+      // This prevents data loss (race conditions) if a new BLE packet arrives 
+      // while the main loop is busy calculating or printing.
+      uint32_t current_buffer_length = buffer_data_length.exchange(0);
+      
+      throughput_kps = (current_buffer_length * 8.0)/1000.0;
+      packets = current_buffer_length / BUFFER_SIZE_BYTES;
       unsigned long experiment_time = current_time - connection_start_time;
 
       Serial.printf("Total time: %lu | Packets: %d | Throughput: %.2f kps | Packet Loss per Second: %lu | Total Packet Loss: %lu\n", 
                                       experiment_time, packets, throughput_kps, packet_loss_per_sec, total_packet_loss);
 
       last_time += 1000;
-      buffer_data_length = 0;
+      //buffer_data_length = 0;
       packet_loss_per_sec = 0;
     }
   }

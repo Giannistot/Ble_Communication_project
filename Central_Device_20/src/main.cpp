@@ -5,15 +5,14 @@
 
 #define SERVICE_UUID "2e75afd8-1981-4b3c-b5f5-256539a37d3f"
 #define CHARACTERISTIC_UUID "54bbb94b-b2e8-44b4-82cf-94bf26d02f9d"
-#define ACK_CHARACTERISTIC_UUID "11111111-2222-3333-4444-555555555555"
 
 //Total size of data buffer
-#define BUFFER_SIZE_BYTES 238
+#define BUFFER_SIZE_BYTES 104
 
 //Select value of phy level 1:1M (1Mbps), 2:2M(2Mbps), 3:Coded_2 (500kbps), 4:Coded_8 (125kbps)
-#define PHY_LEVEL 1
+#define PHY_LEVEL 4
 
-#define CONN_INTERVAL 80
+#define CONN_INTERVAL 24
 
 static const NimBLEAdvertisedDevice* advDevice;
 
@@ -136,7 +135,7 @@ void notifyCallback(NimBLERemoteCharacteristic* pRemoteCharacteristic, uint8_t* 
 
   // --- ID logic  ---
   // We ensure that we have found the ACK flag AND that the packet has at least 4 bytes.
-  if (pAckChr != nullptr && length >= sizeof(uint32_t)) {
+  if (length >= sizeof(uint32_t)) {
     uint32_t received_id;
     
     // 1. Extraction of the first 4 bytes and place them into the variable `received_id`.
@@ -150,8 +149,6 @@ void notifyCallback(NimBLERemoteCharacteristic* pRemoteCharacteristic, uint8_t* 
     // Updating what we expect for next time.
     expected_packet_id = received_id + 1;
     
-    // 2. Send back to Peripheral the first 4 bytes (id) wihout response 
-    pAckChr->writeValue((uint8_t*)&received_id, sizeof(uint32_t), false); 
   }
 }
 
@@ -200,15 +197,9 @@ bool connectToServer(){
     pClient -> disconnect();
     return false;
   }
-  // Searching for the ACK characteristic
-  pAckChr = pSvc->getCharacteristic(ACK_CHARACTERISTIC_UUID);
-  if(pAckChr == nullptr)
-  {
-    Serial.println("ACK Characteristic not found! (Check Peripheral code)");
-  }
 
   //4)-----------Notify------------
-  if(pChr->canNotify())
+  if(pChr->canIndicate())
   {
     expected_packet_id = 1;
     total_packet_loss = 0;
@@ -216,12 +207,12 @@ bool connectToServer(){
     buffer_data_length = 0;
     last_time = millis();
     connection_start_time = last_time;
-    pChr->subscribe(true, notifyCallback);
-    Serial.println("Subscribe! Waiting for data...");
+    pChr->subscribe(false, notifyCallback);
+    Serial.println("Subscribe to Indication! Waiting for data...");
   }
   else
   {
-    Serial.println("Characteristic does not support Notify. Disconnection...");
+    Serial.println("Characteristic does not support Indicate. Disconnection...");
     pClient->disconnect();
     return false;
   }
@@ -246,10 +237,6 @@ void setup() {
 
   pScan->setScanCallbacks(&scanCallbacks, true);
 
-  //set the scanning parameters (scan interval, scan window)
-  //pScan -> setInterval(100);
-  //pScan -> setWindow(99);
-
   pScan -> setActiveScan(true); //active scanning
 
   pScan -> start(0, false);
@@ -257,17 +244,6 @@ void setup() {
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
-
-  // Serial.print("Data (HEX): ");
-  // for(int i=0; i < buffer_data_length; i++)
-  // {
-  //   if(buffer_data[i] < 16) Serial.print("0");
-  //   Serial.print(buffer_data[i], HEX);
-  //   Serial.print("-");
-
-  // }
-  // Serial.println();
 
   if(doConnect){
     doConnect = false;
@@ -276,14 +252,6 @@ void loop() {
     {
       Serial.println("Client is ready and receives data.");
       isConnected = true;
-
-      //last_time = millis();
-
-      //Serial.printf(">>> Connected at t=%lu ms (since boot)\n", last_time); 
-
-      // expected_packet_id = 1;
-      // total_packet_loss = 0;
-      // packet_loss_per_sec = 0;
     }
     else
     {
@@ -304,14 +272,13 @@ void loop() {
       uint32_t current_buffer_length = buffer_data_length.exchange(0);
       
       throughput_kps = (current_buffer_length * 8.0)/1000.0;
-      packets = current_buffer_length / BUFFER_SIZE_BYTES;
+      packets = current_buffer_length / (BUFFER_SIZE_BYTES - sizeof(uint32_t));
       unsigned long experiment_time = current_time - connection_start_time;
 
       Serial.printf("Total time: %lu | Packets: %d | Throughput: %.2f kps | Packet Loss per Second: %lu | Total Packet Loss: %lu\n", 
                                       experiment_time, packets, throughput_kps, packet_loss_per_sec, total_packet_loss);
 
       last_time += 1000;
-      //buffer_data_length = 0;
       packet_loss_per_sec = 0;
     }
   }

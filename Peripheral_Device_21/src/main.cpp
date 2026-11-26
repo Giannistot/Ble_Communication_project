@@ -7,33 +7,25 @@
 
 #define SERVICE_UUID "2e75afd8-1981-4b3c-b5f5-256539a37d3f"
 #define CHARACTERISTIC_UUID "54bbb94b-b2e8-44b4-82cf-94bf26d02f9d"
-#define ACK_CHARACTERISTIC_UUID "11111111-2222-3333-4444-555555555555"
-
-//Maximum number of packet in flight (without receive ack). Try 1, 5, 10, 20.
-//build_flags = 
-//    -D CONFIG_BT_NIMBLE_ACL_BUF_COUNT=30 (default os 24)
-//Window should be equal to (CONFIG_BT_NIMBLE_ACL_BUF_COUNT -4) max value
-//If we want bigger window without packet loss , we should change CONFIG_BT_NIMBLE_ACL_BUF_COUNT from platformio.
-//both central and peripheral
-#define WINDOW 10
 
 //Print latency only every N packets. Serial.printf on every ACK causes blocking.
 //the NimBLE host task (115200 baud) and reduces throughput.
 #define LATENCY_PRINT_EVERY 1
 
 //If no ACK arrives for a certain number of ms while the window is full, we break the deadlock.
-#define ACK_TIMEOUT_MS 200
+//#define ACK_TIMEOUT_MS 200
 
 //Select value of phy level 1:1M (1Mbps), 2:2M(2Mbps), 3:Coded_2 (500kbps), 4:Coded_8 (125kbps)
-#define PHY_LEVEL 1
+#define PHY_LEVEL 4
 
-#define DATA_SIZE 238
+#define DATA_SIZE 104
 
 uint8_t dummy_data_full[DATA_SIZE];
 int64_t timestamps_log[4096] = {0};
 
 uint32_t packet_id = 0;
-std::atomic<uint32_t> last_acked_id(0);
+std::atomic<bool> waiting_for_confirm(false);
+std::atomic<int64_t> packet_start_time(0);
 
 volatile bool deviceConnected = false;
 volatile bool subscribed = false;
@@ -43,44 +35,39 @@ static NimBLEServer* pServer;
 NimBLECharacteristic* pCharacteristic = NULL;
 NimBLECharacteristic* pAckCharacteristic = NULL;
 
-//---------Callback του ACK characteristic (Write No Response από το Central)---------
-class ackCallbacks : public NimBLECharacteristicCallbacks {
-    void onWrite(NimBLECharacteristic* pChar, NimBLEConnInfo& connInfo) override {
-        int64_t end_time = esp_timer_get_time();
-
-        NimBLEAttValue rx_data = pChar->getValue();
-        if (rx_data.length() == sizeof(uint32_t)) {
-            uint32_t received_id;
-            memcpy(&received_id, rx_data.data(), sizeof(uint32_t));
-
-            if (received_id > last_acked_id.load()) {
-                last_acked_id = received_id;
-            }
-            last_ack_time = millis();
-
-            int64_t start_time = timestamps_log[received_id % 4096];
-
-            if (start_time > 0 && (received_id % LATENCY_PRINT_EVERY) == 0) {
-                int64_t rtt_us = end_time - start_time;
-                float latency_ms = rtt_us / 2000.0; // One-way latency (RTT/2) σε ms
-                Serial.printf("ID: %u | Latency: %.2f ms\n", received_id, latency_ms);
-            }
-        }
-    }
-};
-
 //---------Callback του data characteristic: ξέρουμε πότε το Central έκανε subscribe---------
 class dataCallbacks : public NimBLECharacteristicCallbacks {
     void onSubscribe(NimBLECharacteristic* pChar, NimBLEConnInfo& connInfo, uint16_t subValue) override {
-        if (subValue & 1) { // notifications ενεργοποιήθηκαν
+        if (subValue & 2) { // notifications ενεργοποιήθηκαν
             packet_id = 0;
-            last_acked_id = 0;
-            last_ack_time = millis();
-            memset(timestamps_log, 0, sizeof(timestamps_log));
+            waiting_for_confirm = false;
+            //last_acked_id = 0;
+            //last_ack_time = millis();
+            //memset(timestamps_log, 0, sizeof(timestamps_log));
             subscribed = true; 
-            Serial.println(">>> Central subscribed, starting transmission");
+            Serial.println(">>> Central subscribed to INDICATIONS, starting transmission");
         } else {
             subscribed = false;
+            waiting_for_confirm = false;
+        }
+    }
+
+    void onStatus(NimBLECharacteristic* pChar, int code) override{
+        if(code == BLE_HS_EDONE)
+        {
+            int64_t end_time = esp_timer_get_time();
+            int64_t start_time = packet_start_time.load();
+
+            if (start_time > 0 && (packet_id % LATENCY_PRINT_EVERY) == 0) {
+                int64_t rtt_us = end_time - start_time;
+                float latency_ms = rtt_us / 2000.0; // One-way latency (RTT/2) σε ms
+                Serial.printf("ID: %u | Latency: %.2f ms\n", packet_id, latency_ms);
+                
+            }
+            waiting_for_confirm = false;
+        }else if(code !=0){
+            Serial.printf(">>> Indication error code: %d\n", code);
+            waiting_for_confirm = false;
         }
     }
 };
@@ -147,15 +134,21 @@ void setup() {
     NimBLEService* pService = pServer->createService(SERVICE_UUID);
 
     pCharacteristic = pService->createCharacteristic(CHARACTERISTIC_UUID,
-                                                     NIMBLE_PROPERTY::NOTIFY);
+                                                     NIMBLE_PROPERTY::INDICATE);
     pCharacteristic->setCallbacks(new dataCallbacks());
 
     // Χαρακτηριστικό λήψης ACK (Write No Response)
-    pAckCharacteristic = pService->createCharacteristic(ACK_CHARACTERISTIC_UUID,
-                                                        NIMBLE_PROPERTY::WRITE_NR);
-    pAckCharacteristic->setCallbacks(new ackCallbacks());
+    //pAckCharacteristic = pService->createCharacteristic(ACK_CHARACTERISTIC_UUID,
+    //                                                    NIMBLE_PROPERTY::WRITE_NR);
+    //pAckCharacteristic->setCallbacks(new ackCallbacks());
 
     memset(dummy_data_full, 0, sizeof(dummy_data_full));
+
+    for (int i = 4; i < sizeof(dummy_data_full); i++) {
+        if (i % 3 == 0)      dummy_data_full[i] = 175;
+        else if (i % 3 == 1) dummy_data_full[i] = 217;
+        else                 dummy_data_full[i] = 33;
+    }
 
     pServer->start();
 
@@ -176,50 +169,27 @@ void loop() {
         return;
     }
 
-    // Determine the current number of unacknowledged packets (in-flight) 
-    // to apply backpressure if the sliding window is full.
-    uint32_t in_flight = packet_id - last_acked_id.load();
-
-    // Safety: if an ACK is lost and the window remains full, unblock it
-    if (in_flight >= WINDOW && (millis() - last_ack_time) > ACK_TIMEOUT_MS) {
-        last_acked_id = packet_id;
-        last_ack_time = millis();
-        in_flight = 0;
-    }
-    /*
-    * Application-Layer Flow Control (Sliding Window Mechanism)
-    * Checks if the number of unacknowledged packets (in_flight) is below the 
-    * maximum allowed WINDOW size. If capacity exists, it constructs the packet 
-    * (Sequence ID + Dummy Payload), logs the exact transmission time for latency 
-    * tracking, and sends it via BLE notification. 
-    * If the window is full, it triggers CPU yielding (delay) to allow the underlying 
-    * NimBLE FreeRTOS tasks to process incoming ACKs and clear the buffer.
-    */
-    if (in_flight < WINDOW) {
-        for (int i = 4; i < sizeof(dummy_data_full); i++) {
-            if (i % 3 == 0)      dummy_data_full[i] = 175;
-            else if (i % 3 == 1) dummy_data_full[i] = 217;
-            else                 dummy_data_full[i] = 33;
-        }
+    if (!waiting_for_confirm.load()) {
 
         //packet_id++;
         uint32_t next_packet_id = packet_id + 1;
         memcpy(dummy_data_full, &next_packet_id, sizeof(next_packet_id));
         pCharacteristic->setValue(dummy_data_full, sizeof(dummy_data_full));
 
-        bool success = pCharacteristic->notify();
+        packet_id = next_packet_id;
+        packet_start_time = esp_timer_get_time();
+        waiting_for_confirm = true;
+
+        bool success = pCharacteristic->indicate();
 
 
-        if(success)
+        if(!success)
         {
-            packet_id = next_packet_id;
-            timestamps_log[packet_id % 4096] = esp_timer_get_time();
+            packet_id--;
+            waiting_for_confirm = false;
+            delay(1);
 
         }
-        else {
-            delay(1);
-        }
-        //pCharacteristic->notify();
     } else {
         delay(1); 
     }
